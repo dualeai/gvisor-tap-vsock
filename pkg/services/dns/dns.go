@@ -66,6 +66,12 @@ func (h *dnsHandler) addLocalAnswers(m *dns.Msg, q dns.Question) bool {
 				withoutZone := strings.TrimSuffix(q.Name, zoneSuffix)
 				if (record.Name != "" && record.Name == withoutZone) ||
 					(record.Regexp != nil && record.Regexp.MatchString(withoutZone)) {
+					// Duale: Allow forwarding to upstream when IP is nil/empty
+					// Enables whitelist filtering: domains with nil IP forward upstream,
+					// unlisted domains blocked by defaultIP
+					if record.IP == nil || record.IP.Equal(net.IP{}) {
+						return false // Forward to upstream DNS
+					}
 					m.Answer = append(m.Answer, &dns.A{
 						Hdr: dns.RR_Header{
 							Name:   q.Name,
