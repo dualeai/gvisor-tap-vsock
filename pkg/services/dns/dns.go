@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"regexp"
 	"strings"
 	"sync"
 
@@ -25,10 +26,11 @@ type upstreamResolver interface {
 }
 
 type dnsHandler struct {
-	zones     []types.Zone
-	zonesLock sync.RWMutex
-	upstream  upstreamResolver
-	cache     *dnscache.DNSCache // nil = no caching
+	zones         []types.Zone
+	zonesLock     sync.RWMutex
+	upstream      upstreamResolver
+	cache         *dnscache.DNSCache // nil = no caching
+	outboundAllow []*regexp.Regexp
 }
 
 func (h *dnsHandler) handle(w dns.ResponseWriter, r *dns.Msg, responseMessageSize int) {
@@ -118,10 +120,32 @@ func splitTxt(s string) []string {
 
 	return c
 }
+
+// matchesAllowlist checks whether the given domain matches at least one of
+// the compiled regex patterns. Returns false if the allowlist is empty.
+func matchesAllowlist(domain string, allowlist []*regexp.Regexp) bool {
+	for _, re := range allowlist {
+		if re.MatchString(domain) {
+			return true
+		}
+	}
+	return false
+}
+
 func (h *dnsHandler) addAnswers(m *dns.Msg) {
 	for _, q := range m.Question {
 		if done := h.addLocalAnswers(m, q); done {
 			return
+		}
+
+		// Check outbound allowlist before upstream resolution.
+		if len(h.outboundAllow) > 0 {
+			domain := strings.TrimSuffix(q.Name, ".")
+			if !matchesAllowlist(domain, h.outboundAllow) {
+				log.Debugf("Blocking DNS query for %q (not in outboundAllow)", domain)
+				m.Rcode = dns.RcodeNameError
+				return
+			}
 		}
 
 		resolver := h.upstream
@@ -255,15 +279,15 @@ type Server struct {
 	handler *dnsHandler
 }
 
-func New(udpConn net.PacketConn, tcpLn net.Listener, zones []types.Zone, cache *dnscache.DNSCache) (*Server, error) {
+func New(udpConn net.PacketConn, tcpLn net.Listener, zones []types.Zone, cache *dnscache.DNSCache, outboundAllow []*regexp.Regexp) (*Server, error) {
 	upstream := &net.Resolver{
 		PreferGo: false,
 	}
-	return NewWithUpstreamResolver(udpConn, tcpLn, zones, upstream, cache)
+	return NewWithUpstreamResolver(udpConn, tcpLn, zones, upstream, cache, outboundAllow)
 }
 
-func NewWithUpstreamResolver(udpConn net.PacketConn, tcpLn net.Listener, zones []types.Zone, upstream upstreamResolver, cache *dnscache.DNSCache) (*Server, error) {
-	handler := &dnsHandler{zones: zones, upstream: upstream, cache: cache}
+func NewWithUpstreamResolver(udpConn net.PacketConn, tcpLn net.Listener, zones []types.Zone, upstream upstreamResolver, cache *dnscache.DNSCache, outboundAllow []*regexp.Regexp) (*Server, error) {
+	handler := &dnsHandler{zones: zones, upstream: upstream, cache: cache, outboundAllow: outboundAllow}
 	return &Server{udpConn: udpConn, tcpLn: tcpLn, handler: handler}, nil
 }
 
